@@ -3,6 +3,7 @@ import logging
 import logging.handlers
 import os
 from datetime import date
+from sqlalchemy import func
 from sqlalchemy import (
     Column,
     ForeignKey,
@@ -21,11 +22,6 @@ from sqlalchemy.orm.collections import attribute_mapped_collection
 from sqlalchemy.inspection import inspect
 from sqlalchemy.exc import NoInspectionAvailable
 
-
-# logging.basicConfig(
-#     format='%(asctime)s [%(levelname)s:%(name)s] %(message)s',
-#     filename="logs/investment_tracker.log", level=db_logger.warning, filemode="w")
-
 # creates logs file if not exists
 try:
     os.makedirs("logs")
@@ -33,17 +29,17 @@ except OSError:
     pass
 
 LOG_FILE_PATH = "logs/investment_tracker.log"
-db_logger = logging.getLogger("DBLogger")
-db_logger.setLevel(logging.INFO)
+investment_tracker_logger = logging.getLogger(__name__)
+investment_tracker_logger.setLevel(logging.INFO)
 handler = logging.FileHandler(LOG_FILE_PATH, mode="w")
-formatter = logging.Formatter("%(asctime)s [%(levelname)s:%(name)s] %(message)s")
+formatter = logging.Formatter("%(asctime)s %(levelname)s [%(filename)s:%(lineno)s] %(message)s")
 handler.setFormatter(formatter)
-db_logger.addHandler(handler)
+investment_tracker_logger.addHandler(handler)
 
 Base = declarative_base()
 
 # Creates an in memory database using sqlite3
-engine = create_engine("sqlite:///:memory:", echo=False)
+engine = create_engine("sqlite:///:memory:", echo=True)
 
 Session = sessionmaker()
 
@@ -65,8 +61,8 @@ class ModelReprMixin(object):
             )
             return f"<{model.__name__}({repr_properties})>"
         except (NoInspectionAvailable, AttributeError, TypeError) as e:
-            db_logger.warning(e)
-        return super().__repr__()
+            investment_tracker_logger.warning(e)
+            return super().__repr__()
 
 
 class ModelLoggingMixin(object):
@@ -74,7 +70,7 @@ class ModelLoggingMixin(object):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        db_logger.info(f"{self} created")
+        investment_tracker_logger.debug(f"{self} created")
 
 
 class User(ModelLoggingMixin, ModelReprMixin, Base):
@@ -100,20 +96,54 @@ class User(ModelLoggingMixin, ModelReprMixin, Base):
     # All transactions made by the user
     transactions = relationship("Transaction", back_populates="user")
 
+    def stock_quantity(self, ticker):
+        stock = session.query(Stock).filter(Stock.ticker == ticker).one()
+        stocks_bought = (
+            session.query(func.sum(Transaction.quantity))
+            .filter(Transaction.user_id == self.id, Transaction.stock_id == stock.id, Transaction.kind == "buy")
+            .scalar()
+            or 0
+        )
+        stocks_sold = (
+            session.query(func.sum(Transaction.quantity))
+            .filter(Transaction.user_id == self.id, Transaction.stock_id == stock.id, Transaction.kind == "sell")
+            .scalar()
+            or 0
+        )
+
+        return stocks_bought - stocks_sold
+
     def order(self, ticker, kind, quantity, price=None, day=date.today()):
         """User initiates an order of a stock"""
         # TODO add api call if ticker does not exist in db
+        order_modifier = {"buy": 1, "sell": -1}
+        if kind not in order_modifier:
+            raise ValueError(f"{kind} order type not recognized.")
         # searches database for a stock if exists
         stock = session.query(Stock).filter(Stock.ticker == ticker).one()
-        if price is not None:
-            price = session.query(Price).filter(Price.ticker == ticker, Price.day == day).one()
-        self.transactions.append(Transaction(stock_id=stock.id, quantity=quantity, kind=kind, stock_price=price))
-        # Reduce available funds by price
-        self.available_funds = self.available_funds - 1
+        if price is None:
+            price = session.query(Price).filter(Price.stock_id == stock.id, Price.day == day).one()
+        investment_tracker_logger.debug(f"Price fetched for buy order: {price}")
+        # change sign of quantity based on order type
         try:
-            db_logger.info(f"{self.transactions[-1]} pending commit on transactions table")
+            # Reduce available funds by price
+            final_price = self.available_funds - order_modifier[kind] * price.price
+            if final_price < 0:
+                raise ValueError("Available price cannot become negative.")
+            self.available_funds = final_price
+        except ValueError as e:
+            investment_tracker_logger.error(e, exc_info=True)
+            session.rollback()
+            return
+        finally:
+            investment_tracker_logger.debug(f"User final state: {self}")
+        try:
+            self.transactions.append(Transaction(stock_id=stock.id, quantity=quantity, kind=kind, stock_price=price))
+            investment_tracker_logger.info(f"{self.transactions[-1]} order created.")
         except IndexError:
-            logging.error(f"{self} cannot find most recently appended entry for transaction relationship")
+            logging.error(
+                f"{self} cannot find most recently appended entry for transaction relationship", exc_info=True
+            )
 
     def buy(self, ticker, quantity, price=None, day=date.today()):
         """buy order"""
@@ -121,7 +151,11 @@ class User(ModelLoggingMixin, ModelReprMixin, Base):
 
     def sell(self, ticker, quantity, price=None, day=date.today()):
         """sell order"""
-        self.order(ticker, "sell", quantity, price=price, day=day)
+        stock_quantity_held = self.stock_quantity(ticker)
+        if stock_quantity_held - quantity >= 0:
+            self.order(ticker, "sell", quantity, price=price, day=day)
+        else:
+            raise ValueError(f"{quantity} of {ticker} to be sold, but only {stock_quantity_held} of {ticker} available")
 
 
 class Stock(ModelLoggingMixin, ModelReprMixin, Base):
@@ -164,7 +198,7 @@ class Stock(ModelLoggingMixin, ModelReprMixin, Base):
         -------
 
         """
-        self.price[day] = Price(stock_id=self.id, day=day, price=price * 100)
+        self.price[day] = Price(stock_id=self.id, day=day, price=price)
 
     def get_price(self, query_date=date.today()):
         # TODO api call if price does not exist
@@ -234,4 +268,5 @@ class Transaction(ModelLoggingMixin, ModelReprMixin, Base):
         return int(q * self.stock_price.price) if q else self.transfer_amt
 
 
+# creates all tables
 Base.metadata.create_all(engine)
