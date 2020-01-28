@@ -5,7 +5,7 @@
 import pytest
 from logging import getLogger, DEBUG, WARNING, INFO, ERROR, CRITICAL
 from click.testing import CliRunner
-from investment_tracker.investment_tracker import session, Stock, User
+from investment_tracker.investment_tracker import session, Stock, User, Price, Transaction
 from investment_tracker import cli
 from datetime import date
 
@@ -66,3 +66,74 @@ def test_investment_tracker():
         f"{users.transactions[0]} total price: {users.transactions[0].total_price}"
     )
     test_investment_tracker_logger.info(f"{users.transactions[0].stock_price}")
+
+
+@pytest.fixture(scope='class')
+def sample_user():
+    return User(username='sample_user', available_funds=1000)
+
+
+@pytest.fixture(scope='module')
+def sample_stock():
+    return Stock(ticker='sample_stock')
+
+
+@pytest.fixture(scope='module')
+def sample_price():
+    return Price(price=10, day=date.today())
+
+
+@pytest.fixture(scope='module')
+def sample_transaction():
+    return Transaction(day=date.today(), quantity=0)
+
+
+@pytest.fixture(scope='module')
+def sample_stock_purchase():
+    return Transaction(day=date.today(), quantity=1, kind='buy')
+
+
+@pytest.fixture(scope='module')
+def sample_transfer():
+    return Transaction(day=date.today(), kind='transfer', transfer_amt=50)
+
+
+class TestUser():
+
+    def test_username(self, sample_user):
+        assert sample_user.username == 'sample_user'
+
+    def test_available_funds(self, sample_user):
+        assert sample_user.available_funds == 1000
+
+
+class TestStock():
+
+    def test_ticker(self, sample_stock):
+        assert sample_stock.ticker == 'sample_stock'
+
+
+class TestPrice():
+
+    def test_price(self, sample_price):
+        assert sample_price.price == 10
+
+    def test_day(self, sample_price):
+        assert sample_price.day == date.today()
+
+    # TODO figure out how to test default values
+    @pytest.mark.skip
+    def test_default_day(self, sample_price):
+        assert Price(price=10).day == date.today()
+
+
+class TestTransaction():
+
+    def test_day(self, sample_transaction):
+        assert sample_transaction.day == date.today()
+
+    def test_quantity(self, sample_transaction):
+        assert sample_transaction.quantity == 0
+
+    def test_kind(self, sample_stock_purchase):
+        assert sample_stock_purchase.kind == 'buy'

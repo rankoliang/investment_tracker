@@ -238,6 +238,7 @@ class Transaction(ModelLoggingMixin, ModelReprMixin, Base):
     day -- date of the transaction
     quantity -- amount of stock being bought or sold
     kind -- type of transaction. Either buy, sell, or transfer (of funds)
+    transfer_amt -- amount of money transferred when funds are being transferred
     total_price -- total transaction cost in cents (sqlite does not support decimal)
     """
 
