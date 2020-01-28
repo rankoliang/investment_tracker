@@ -3,10 +3,7 @@ Investment Tracker
 ==================
 
 
-.. image:: https://img.shields.io/pypi/v/investment_tracker.svg
-        :target: https://pypi.python.org/pypi/investment_tracker
-
-.. image:: https://img.shields.io/travis/rankoliang/investment_tracker.svg
+.. image:: https://img.shields.io/travis/com/rankoliang/investment_tracker.svg
         :target: https://travis-ci.org/rankoliang/investment_tracker
 
 .. image:: https://readthedocs.org/projects/investment-tracker/badge/?version=latest
