@@ -11,13 +11,9 @@ from sqlalchemy import (
     String,
     Float,
     Date,
-    # Numeric,
-    # ForeignKeyConstraint,
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 from sqlalchemy.orm.collections import attribute_mapped_collection
 from sqlalchemy.inspection import inspect
 from sqlalchemy.exc import NoInspectionAvailable
@@ -31,21 +27,12 @@ except OSError:
 LOG_FILE_PATH = "logs/investment_tracker.log"
 investment_tracker_logger = logging.getLogger(__name__)
 investment_tracker_logger.setLevel(logging.INFO)
-handler = logging.FileHandler(LOG_FILE_PATH, mode="w")
+handler = logging.FileHandler(LOG_FILE_PATH, mode="a")
 formatter = logging.Formatter("%(asctime)s %(levelname)s [%(filename)s:%(lineno)s] %(message)s")
 handler.setFormatter(formatter)
 investment_tracker_logger.addHandler(handler)
 
 Base = declarative_base()
-
-# Creates an in memory database using sqlite3
-engine = create_engine("sqlite:///:memory:", echo=True)
-
-Session = sessionmaker()
-
-Session.configure(bind=engine)
-
-session = Session()
 
 
 class ModelReprMixin(object):
@@ -73,6 +60,14 @@ class ModelLoggingMixin(object):
         investment_tracker_logger.debug(f"{self} created")
 
 
+class InsufficientQuantity(ValueError):
+    pass
+
+
+class InsufficientFunds(ValueError):
+    pass
+
+
 class User(ModelLoggingMixin, ModelReprMixin, Base):
     """
     Stores user information, such as username and available funds. Users can perform certain actions with stocks.
@@ -96,30 +91,27 @@ class User(ModelLoggingMixin, ModelReprMixin, Base):
     # All transactions made by the user
     transactions = relationship("Transaction", back_populates="user")
 
-    def stock_quantity(self, ticker):
+    def stock_quantity(self, ticker, session=None):
         stock = session.query(Stock).filter(Stock.ticker == ticker).one()
-        stocks_bought = (
-            session.query(func.sum(Transaction.quantity))
-            .filter(Transaction.user_id == self.id, Transaction.stock_id == stock.id, Transaction.kind == "buy")
+        stocks_available = (
+            session.query(func.sum(TransactionStock.quantity))
+            .join(Transaction, TransactionStock.transaction_id == Transaction.id)
+            .filter(Transaction.user_id == self.id, TransactionStock.stock_id == stock.id, Transaction.kind == "stock")
             .scalar()
-            or 0
-        )
-        stocks_sold = (
-            session.query(func.sum(Transaction.quantity))
-            .filter(Transaction.user_id == self.id, Transaction.stock_id == stock.id, Transaction.kind == "sell")
-            .scalar()
-            or 0
-        )
+        ) or 0
 
-        return stocks_bought - stocks_sold
+        return stocks_available
 
-    def order(self, ticker, kind, quantity, price=None, day=date.today()):
+    def order(self, ticker, quantity, price=None, day=date.today(), session=None):
         """User initiates an order of a stock"""
         # TODO add api call if ticker does not exist in db
-        order_modifier = {"buy": 1, "sell": -1}
-        if kind not in order_modifier:
-            raise ValueError(f"{kind} order type not recognized.")
         # searches database for a stock if exists
+        stock_quantity_held = self.stock_quantity(ticker, session=session)
+        if stock_quantity_held + quantity < 0:
+            raise InsufficientQuantity(
+                f"{-1 * quantity} of {ticker} to be sold, but only {stock_quantity_held} of {ticker} available"
+            )
+
         stock = session.query(Stock).filter(Stock.ticker == ticker).one()
         if price is None:
             price = session.query(Price).filter(Price.stock_id == stock.id, Price.day == day).one()
@@ -127,35 +119,23 @@ class User(ModelLoggingMixin, ModelReprMixin, Base):
         # change sign of quantity based on order type
         try:
             # Reduce available funds by price
-            final_price = self.available_funds - order_modifier[kind] * price.price
+            final_price = self.available_funds - quantity * price.price
             if final_price < 0:
-                raise ValueError("Available price cannot become negative.")
+                raise InsufficientFunds("Available price cannot become negative.")
             self.available_funds = final_price
         except ValueError as e:
             investment_tracker_logger.error(e, exc_info=True)
             session.rollback()
-            return
+            raise e
         finally:
             investment_tracker_logger.debug(f"User final state: {self}")
         try:
-            self.transactions.append(Transaction(stock_id=stock.id, quantity=quantity, kind=kind, stock_price=price))
+            self.transactions.append(Transaction(day=day).stock_order(stock_id=stock.id, quantity=quantity))
             investment_tracker_logger.info(f"{self.transactions[-1]} order created.")
         except IndexError:
             logging.error(
-                f"{self} cannot find most recently appended entry for transaction relationship", exc_info=True
+                f"{self} cannot find most recently appended entry for transaction relationship", exc_info=True,
             )
-
-    def buy(self, ticker, quantity, price=None, day=date.today()):
-        """buy order"""
-        self.order(ticker, "buy", quantity, price=price, day=day)
-
-    def sell(self, ticker, quantity, price=None, day=date.today()):
-        """sell order"""
-        stock_quantity_held = self.stock_quantity(ticker)
-        if stock_quantity_held - quantity >= 0:
-            self.order(ticker, "sell", quantity, price=price, day=day)
-        else:
-            raise ValueError(f"{quantity} of {ticker} to be sold, but only {stock_quantity_held} of {ticker} available")
 
 
 class Stock(ModelLoggingMixin, ModelReprMixin, Base):
@@ -182,9 +162,6 @@ class Stock(ModelLoggingMixin, ModelReprMixin, Base):
         collection_class=attribute_mapped_collection("day"),  # dictionary mapped by day
     )
 
-    # def __repr__(self):
-    #     return f"<Stock(ticker={self.ticker})>"
-
     def set_price(self, price, day=date.today()):
         """
         sets price of stock in cents on a given day
@@ -201,8 +178,11 @@ class Stock(ModelLoggingMixin, ModelReprMixin, Base):
         self.price[day] = Price(stock_id=self.id, day=day, price=price)
 
     def get_price(self, query_date=date.today()):
+        """
+        returns the price value of the stock on a given day
+        """
         # TODO api call if price does not exist
-        return self.price[query_date]
+        return self.price[query_date].price
 
 
 class Price(ModelLoggingMixin, ModelReprMixin, Base):
@@ -217,14 +197,20 @@ class Price(ModelLoggingMixin, ModelReprMixin, Base):
 
     __tablename__ = "prices"
     stock_id = Column(Integer, ForeignKey("stocks.id"), primary_key=True)
-    day = Column(Date, primary_key=True)
+    day = Column(Date, primary_key=True, default=date.today())
     price = Column(Integer, nullable=False)
-
-    # all transactions in a certain day
-    transactions = relationship("Transaction", back_populates="stock_price")
 
     # Ticker of the stock
     ticker = relationship("Stock", back_populates="price", uselist=False)
+
+    transaction_details = relationship(
+        "TransactionStock",
+        secondary="transactions",
+        primaryjoin="TransactionStock.transaction_id==Transaction.id",
+        secondaryjoin="and_(TransactionStock.stock_id==Price.stock_id, Price.day==Transaction.day)",
+        back_populates="stock_price",
+        uselist=False,
+    )
 
 
 class Transaction(ModelLoggingMixin, ModelReprMixin, Base):
@@ -234,40 +220,75 @@ class Transaction(ModelLoggingMixin, ModelReprMixin, Base):
     Keyword arguments:
     id -- Primary key of the transactions table
     user_id -- id of the user who is executing a transaction
-    stock_id -- id of the stock in the order
     day -- date of the transaction
-    quantity -- amount of stock being bought or sold
-    kind -- type of transaction. Either buy, sell, or transfer (of funds)
-    transfer_amt -- amount of money transferred when funds are being transferred
-    total_price -- total transaction cost in cents (sqlite does not support decimal)
+    kind -- type of transaction. Either stock or transfer (of funds)
     """
 
     __tablename__ = "transactions"
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    stock_id = Column(Integer, ForeignKey("stocks.id"))
     day = Column(Date, ForeignKey("prices.day"), default=date.today())
-    quantity = Column(Float)
-    kind = Column(String(8), nullable=False)  # Buy, sell, or transfer
-    transfer_amt = Column(Integer)
-
-    # The price of the stock on the transaction day
-    stock_price = relationship(
-        Price,
-        primaryjoin="and_(Transaction.stock_id==Price.stock_id, Transaction.day==Price.day)",
-        back_populates="transactions",
-        uselist=False,
-    )
+    kind = Column(String(8), nullable=False)  # stock or transfer
 
     # user who initiated the transaction
     user = relationship(User, back_populates="transactions", uselist=False)
 
-    @property
-    def total_price(self):
-        # SELECT t.quantity * p.price from transactions t join price p on (t.stock_id = p.stock_id AND t.day = d.day)
-        q = self.quantity
-        return int(q * self.stock_price.price) if q else self.transfer_amt
+    stock_order_info = relationship("TransactionStock", back_populates="transaction", uselist=False)
+
+    transfer_info = relationship("TransactionTransfer", back_populates="transaction", uselist=False)
+
+    def stock_order(self, stock_id, quantity):
+        self.stock_order_info = TransactionStock(stock_id=stock_id, quantity=quantity)
+        self.kind = "stock"
+        return self
+
+    def fund_transfer(self, transfer_amount):
+        self.transfer_info = TransactionTransfer(transfer_amount=transfer_amount)
+        self.kind = "transfer"
+        return self
 
 
-# creates all tables
-Base.metadata.create_all(engine)
+class TransactionStock(ModelLoggingMixin, ModelReprMixin, Base):
+    """
+    Stores stock information associated with transactions
+
+    Keyword arguments:
+    transaction_id -- id of the associated transaction
+    stock_id -- id of the transaction being stocks_sold
+    quantity -- amount of stock being bought or sold; positive = buy, negative = sell
+    """
+
+    __tablename__ = "transaction_stock"
+    transaction_id = Column(Integer, ForeignKey("transactions.id"), primary_key=True)
+    stock_id = Column(Integer, ForeignKey("stocks.id"), primary_key=True)
+    quantity = Column(Float)
+
+    transaction = relationship("Transaction", back_populates="stock_order_info", uselist=False)
+
+    # The price of the stock on the transaction day
+    stock_price = relationship(
+        Price,
+        secondary="transactions",
+        primaryjoin="TransactionStock.transaction_id==Transaction.id",
+        secondaryjoin="and_(TransactionStock.stock_id==Price.stock_id, Price.day==Transaction.day)",
+        back_populates="transaction_details",
+        uselist=False,
+    )
+
+    stock = relationship("Stock")
+
+
+class TransactionTransfer(ModelLoggingMixin, ModelReprMixin, Base):
+    """
+    Stores information about transfer of funds to and from accounts
+
+    Keyword arguments:
+    transaction_id -- id of the associated transactions
+    transfer_amount -- amount of money transferred to or from an account; positive = deposit; negative = withdrawal
+    """
+
+    __tablename__ = "transaction_transfer"
+    transaction_id = Column(Integer, ForeignKey("transactions.id"), primary_key=True)
+    transfer_amount = Column(Integer)
+
+    transaction = relationship("Transaction", back_populates="transfer_info", uselist=False)
