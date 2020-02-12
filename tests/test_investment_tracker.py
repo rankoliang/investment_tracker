@@ -3,18 +3,17 @@
 """Tests for `investment_tracker` package."""
 
 import pytest
-from logging import getLogger, DEBUG, WARNING, INFO, ERROR, CRITICAL
+from logging import getLogger, DEBUG
 from click.testing import CliRunner
-from investment_tracker.investment_tracker import (
+from investment_tracker import cli
+from investment_tracker.models import (
     Stock,
     User,
     Price,
     Transaction,
     Base,
-    InsufficientFunds,
-    InsufficientQuantity,
 )
-from investment_tracker import cli
+from investment_tracker.exceptions import InsufficientFunds, InsufficientQuantity
 from datetime import date
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
