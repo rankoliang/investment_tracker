@@ -2,6 +2,8 @@
 Investment Tracker
 ==================
 
+.. image:: https://img.shields.io/pypi/v/investment_tracker.svg
+        :target: https://pypi.python.org/pypi/investment_tracker
 
 .. image:: https://img.shields.io/travis/com/rankoliang/investment_tracker.svg
         :target: https://travis-ci.com/rankoliang/investment_tracker
