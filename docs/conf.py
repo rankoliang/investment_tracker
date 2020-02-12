@@ -17,11 +17,11 @@
 # relative to the documentation root, use os.path.abspath to make it
 # absolute, like shown here.
 #
+import investment_tracker
 import os
 import sys
 sys.path.insert(0, os.path.abspath('..'))
 
-import investment_tracker
 
 # -- General configuration ---------------------------------------------
 
@@ -46,7 +46,7 @@ source_suffix = '.rst'
 master_doc = 'index'
 
 # General information about the project.
-project = 'investment_tracker'
+project = 'Investment Tracker'
 copyright = "2020, Ranko Liang"
 author = "Ranko Liang"
 
@@ -157,6 +157,3 @@ texinfo_documents = [
      'One line description of project.',
      'Miscellaneous'),
 ]
-
-
-
