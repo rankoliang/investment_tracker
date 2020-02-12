@@ -6,17 +6,13 @@ import pytest
 from logging import getLogger, DEBUG
 from click.testing import CliRunner
 from investment_tracker import cli
-from investment_tracker.models import (
-    Stock,
-    User,
-    Price,
-    Transaction,
-    Base,
-)
+from investment_tracker.models import Stock, User, Price, Transaction, Base, ModelReprMixin
 from investment_tracker.exceptions import InsufficientFunds, InsufficientQuantity
 from datetime import date
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.inspection import inspect
+from sqlalchemy.exc import NoInspectionAvailable
 
 
 # Creates an in memory database using sqlite3
@@ -34,6 +30,7 @@ def session():
         yield session
     finally:
         session.close()
+        # drops tables when each test is finished
         Base.metadata.drop_all(engine)
 
 
@@ -78,30 +75,39 @@ def test_command_line_interface():
     assert "--help  Show this message and exit." in help_result.output
 
 
-@pytest.mark.skip
 def test_investment_tracker(session):
     """Sample code on how to use the investment_tracker framework"""
     test_investment_tracker_logger = getLogger("investment_tracker.investment_tracker")
     test_investment_tracker_logger.setLevel(DEBUG)
+
+    # Creates at stock with a the 'BRK.A' ticker symbol
     BRK = Stock(ticker="BRK.A")
-    # sets the price of BRK stock to $20
+
+    # sets the price of BRK stock to 20 units
     BRK.set_price(20, day=date.today())
     session.add(BRK)
-    test_investment_tracker_logger.info(f"{BRK} added to session")
 
+    # Creating a user with the username "buffett" with an initial available funds value of 100
     buffett = User(username="buffett", available_funds=100)
-    buffett.buy("BRK.A", quantity=2, session=session)
-    session.add(buffett)
-    test_investment_tracker_logger.debug(f"{buffett.stock_quantity('BRK.A', session=session)} stocks available to sell")
-    test_investment_tracker_logger.info(f"{buffett} added to session")
-    buffett.sell("BRK.A", quantity=1)
-    session.add(buffett)
-    test_investment_tracker_logger.debug(f"{buffett.stock_quantity('BRK.A')} stocks available to sell")
 
-    users = session.query(User).first()
-    test_investment_tracker_logger.info(users.transactions[0].stock_price)
-    test_investment_tracker_logger.info(f"{users.transactions[0]} total price: {users.transactions[0].total_price}")
-    test_investment_tracker_logger.info(f"{users.transactions[0].stock_price}")
+    # Creates a stock transaction for two BRK.A stocks. The stock parameter can be a Stock object or the ticker string
+    buffett.order(BRK, quantity=2, session=session)
+    session.add(buffett)
+    session.commit()
+
+    assert buffett.stock_quantity(BRK, session=session) == 2
+    assert buffett.available_funds == 100 - BRK.price * 2
+
+    # Creates a stock transaction to sell a 'BRK.A' stock
+    buffett.order(stock="BRK.A", quantity=-1, session=session)
+    session.add(buffett)
+    session.commit()
+    assert buffett.stock_quantity(stock="BRK.A", session=session) == 1
+    assert buffett.available_funds == 100 - BRK.price
+    queried_user = session.query(User).first()
+    assert queried_user is buffett
+    qu_transaction = queried_user.transactions[0]
+    assert qu_transaction.stock_order_info.stock.price == 20
 
 
 class TestUser:
@@ -136,7 +142,7 @@ class TestUser:
         assert order_transaction.stock_order_info.quantity == order_quantity
         assert order_transaction.stock_order_info.stock_id == ordered_stock.id
         assert sample_customer.stock_quantity("sample_stock", session=order_session) == order_quantity
-        assert sample_customer.available_funds == 1000 - order_quantity * ordered_stock.get_price()
+        assert sample_customer.available_funds == 1000 - order_quantity * ordered_stock.price
 
     @pytest.mark.parametrize(
         "available_funds,order_quantities",
@@ -164,7 +170,7 @@ class TestUser:
                 assert len(sample_customer.transactions) == transaction_count
                 assert order_transaction.stock_order_info.stock_id == ordered_stock.id
                 # expected_available_funds
-                available_funds -= quantity * ordered_stock.get_price()
+                available_funds -= quantity * ordered_stock.price
                 assert sample_customer.available_funds == available_funds
             except InsufficientQuantity:
                 assert sample_customer.stock_quantity("sample_stock", session=order_session) >= 0
@@ -194,7 +200,6 @@ class TestPrice:
     def test_day(self, sample_price):
         assert sample_price.day == date.today()
 
-    # @pytest.mark.skip
     def test_default_day(self, session):
         sample_price_default = Price(stock_id=41, price=10)
         session.add(sample_price_default)
@@ -230,3 +235,18 @@ class TestTransaction:
         assert sample_stock_info.transaction.id == 26
         assert sample_stock.id == 41
         assert sample_stock_info.stock.ticker == "sample_stock"
+
+
+class TestModelReprMixin:
+    class CannotBeInspected(ModelReprMixin):
+        def __init__(self):
+            pass
+
+    def test_catch_error(self):
+        tbrc = self.CannotBeInspected()
+        try:
+            inspect(tbrc)
+        except (NoInspectionAvailable, AttributeError, TypeError):
+            assert repr(tbrc)
+            return
+        assert False

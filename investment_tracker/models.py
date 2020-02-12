@@ -48,8 +48,9 @@ class ModelReprMixin(object):
             )
             return f"<{model.__name__}({repr_properties})>"
         except (NoInspectionAvailable, AttributeError, TypeError) as e:
-            investment_tracker_logger.warning(e)
-            return super().__repr__()
+            fallback_repr = super().__repr__()
+            investment_tracker_logger.warning(f"{repr(e)} // fallback repr generated: {fallback_repr}")
+            return fallback_repr
 
 
 class ModelLoggingMixin(object):
@@ -83,8 +84,9 @@ class User(ModelLoggingMixin, ModelReprMixin, Base):
     # All transactions made by the user
     transactions = relationship("Transaction", back_populates="user")
 
-    def stock_quantity(self, ticker, session=None):
-        stock = session.query(Stock).filter(Stock.ticker == ticker).one()
+    def stock_quantity(self, stock, session=None):
+        if not isinstance(stock, Stock):
+            stock = session.query(Stock).filter(Stock.ticker == stock).one()
         stocks_available = (
             session.query(func.sum(TransactionStock.quantity))
             .join(Transaction, TransactionStock.transaction_id == Transaction.id)
@@ -94,39 +96,38 @@ class User(ModelLoggingMixin, ModelReprMixin, Base):
 
         return stocks_available
 
-    def order(self, ticker, quantity, price=None, day=date.today(), session=None):
-        """User initiates an order of a stock"""
+    def order(self, stock, quantity, price=None, day=date.today(), session=None):
+        """
+        User initiates an order of a stock
+
+        params:
+        stock - either a stock object or a string object of the stock ticker
+        quantity - number of stock to be bought or sold. Negative indicates a sell order. Positive indicates a buy order
+
+        """
         # TODO add api call if ticker does not exist in db
-        stock_quantity_held = self.stock_quantity(ticker, session=session)
+        stock_quantity_held = self.stock_quantity(stock, session=session)
         if stock_quantity_held + quantity < 0:
             raise InsufficientQuantity(
-                f"{-1 * quantity} of {ticker} to be sold, but only {stock_quantity_held} of {ticker} available"
+                f"{-1 * quantity} of {stock} to be sold, but only {stock_quantity_held} of {stock} available"
             )
         # searches database for a stock if exists
-        stock = session.query(Stock).filter(Stock.ticker == ticker).one()
-        if price is None:
+        if not isinstance(stock, Stock):
+            stock = session.query(Stock).filter(Stock.ticker == stock).one()
+        if not isinstance(price, Price):
             price = session.query(Price).filter(Price.stock_id == stock.id, Price.day == day).one()
-        investment_tracker_logger.debug(f"Price fetched for buy order: {price}")
+        investment_tracker_logger.debug(f"Price fetched for order: {price}")
         # change sign of quantity based on order type
+        # Reduce available funds by price
+        final_price = self.available_funds - quantity * price.price
         try:
-            # Reduce available funds by price
-            final_price = self.available_funds - quantity * price.price
             if final_price < 0:
                 raise InsufficientFunds("Available price cannot become negative.")
             self.available_funds = final_price
-        except ValueError as e:
-            investment_tracker_logger.error(e, exc_info=True)
-            session.rollback()
-            raise e
         finally:
             investment_tracker_logger.debug(f"User final state: {self}")
-        try:
-            self.transactions.append(Transaction(day=day).stock_order(stock_id=stock.id, quantity=quantity))
-            investment_tracker_logger.info(f"{self.transactions[-1]} order created.")
-        except IndexError:
-            logging.error(
-                f"{self} cannot find most recently appended entry for transaction relationship", exc_info=True,
-            )
+        self.transactions.append(Transaction(day=day).stock_order(stock_id=stock.id, quantity=quantity))
+        investment_tracker_logger.debug(f"{self.transactions[-1]} order created.")
 
 
 class Stock(ModelLoggingMixin, ModelReprMixin, Base):
@@ -139,7 +140,7 @@ class Stock(ModelLoggingMixin, ModelReprMixin, Base):
 
     Methods:
     set_price -- sets the price of a stock for a given day in the prices table
-    get_price -- gets price of stock from the price table
+    price -- gets price of stock from the price table
     """
 
     __tablename__ = "stocks"
@@ -147,7 +148,7 @@ class Stock(ModelLoggingMixin, ModelReprMixin, Base):
     ticker = Column(String(8), unique=True, nullable=False)
 
     # List of prices of the stock
-    price = relationship(
+    prices = relationship(
         "Price",
         back_populates="ticker",
         collection_class=attribute_mapped_collection("day"),  # dictionary mapped by day
@@ -166,14 +167,15 @@ class Stock(ModelLoggingMixin, ModelReprMixin, Base):
         -------
 
         """
-        self.price[day] = Price(stock_id=self.id, day=day, price=price)
+        self.prices[day] = Price(stock_id=self.id, day=day, price=price)
 
-    def get_price(self, query_date=date.today()):
+    @property
+    def price(self, query_date=date.today()):
         """
         returns the price value of the stock on a given day
         """
         # TODO api call if price does not exist
-        return self.price[query_date].price
+        return self.prices[query_date].price
 
 
 class Price(ModelLoggingMixin, ModelReprMixin, Base):
@@ -192,7 +194,7 @@ class Price(ModelLoggingMixin, ModelReprMixin, Base):
     price = Column(Integer, nullable=False)
 
     # Ticker of the stock
-    ticker = relationship("Stock", back_populates="price", uselist=False)
+    ticker = relationship("Stock", back_populates="prices", uselist=False)
 
     transaction_details = relationship(
         "TransactionStock",
