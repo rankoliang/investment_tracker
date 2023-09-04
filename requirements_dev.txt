@@ -10,4 +10,4 @@ Sphinx==7.2.5
 twine==4.0.2
 pytest==7.4.1
 pytest-runner==6.0.0
-black==20.8b1
+black==23.7.0
